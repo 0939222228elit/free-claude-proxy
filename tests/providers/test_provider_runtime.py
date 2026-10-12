@@ -2,7 +2,7 @@ import asyncio
 import gc
 import subprocess
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1281,6 +1281,7 @@ async def test_create_provider_instantiates_each_builtin():
                 rate_limit=7,
                 rate_window=11,
                 max_concurrency=3,
+                capacity=ANY,
             )
             admission_factory.reset_mock()
 
@@ -1310,7 +1311,7 @@ async def test_provider_creation_retries_after_shared_failure(cancelled):
     provider = MagicMock(cleanup=AsyncMock())
     attempts = 0
 
-    async def construct(_id, _settings, _admission_registry):
+    async def construct(_id, _settings, _admission_registry, _api_key_number):
         nonlocal attempts
         attempts += 1
         attempt = attempts
@@ -1366,7 +1367,7 @@ async def test_finished_creation_callback_cannot_forget_a_new_retry():
     attempts = 0
     retry = None
 
-    async def construct(_id, _settings, _admission_registry):
+    async def construct(_id, _settings, _admission_registry, _api_key_number):
         nonlocal attempts, retry
         attempts += 1
         if attempts == 1:
@@ -1411,7 +1412,7 @@ async def test_cancelled_acquisition_keeps_construction_available_to_next_caller
     provider = MagicMock(cleanup=AsyncMock())
     attempts = 0
 
-    async def construct(_id, _settings, _admission_registry):
+    async def construct(_id, _settings, _admission_registry, _api_key_number):
         nonlocal attempts
         attempts += 1
         entered.set()
@@ -1453,7 +1454,7 @@ async def test_abandoned_creation_failure_has_no_unretrieved_exception():
     previous_handler = loop.get_exception_handler()
     errors = []
 
-    async def construct(_id, _settings, _admission_registry):
+    async def construct(_id, _settings, _admission_registry, _api_key_number):
         entered.set()
         await release.wait()
         failed.set()
@@ -1495,7 +1496,7 @@ async def test_shutdown_drains_construction_that_finishes_during_cancellation():
     entered = asyncio.Event()
     provider = MagicMock(cleanup=AsyncMock())
 
-    async def construct(_id, _settings, _admission_registry):
+    async def construct(_id, _settings, _admission_registry, _api_key_number):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -1611,7 +1612,7 @@ async def test_provider_runtime_cleanup_runs_all_even_if_one_fails() -> None:
         ProviderAdmissionRegistry(
             ProviderAdmissionLimits.from_settings(_make_settings())
         ),
-        {"a": p1, "b": p2},
+        {("a", 1): p1, ("b", 1): p2},
     )
 
     with pytest.raises(RuntimeError, match="first"):
@@ -1652,7 +1653,7 @@ async def test_cancelled_cleanup_retains_current_and_unvisited_providers() -> No
         ProviderAdmissionRegistry(
             ProviderAdmissionLimits.from_settings(_make_settings())
         ),
-        {"first": first, "second": second, "third": third},
+        {("first", 1): first, ("second", 1): second, ("third", 1): third},
     )
     cleanup_task = asyncio.create_task(runtime.cleanup())
     await second_started.wait()
@@ -1688,7 +1689,7 @@ async def test_provider_runtime_cleanup_exceptiongroup_on_multiple_failures() ->
         ProviderAdmissionRegistry(
             ProviderAdmissionLimits.from_settings(_make_settings())
         ),
-        {"x": p1, "y": p2},
+        {("x", 1): p1, ("y", 1): p2},
     )
 
     with pytest.raises(ExceptionGroup) as exc_info:
