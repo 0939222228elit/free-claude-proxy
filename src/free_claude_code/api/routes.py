@@ -298,7 +298,7 @@ async def list_models(
     view: ModelCatalogView | None = None,
     x_fcc_model_view: ModelCatalogView | None = Header(default=None),
     services: ApiServices = Depends(get_services),
-    _auth=Depends(require_proxy_auth),
+    _auth=Depends(require_anthropic_proxy_auth),
 ):
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")

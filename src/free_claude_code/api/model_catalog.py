@@ -111,6 +111,11 @@ SUPPORTED_CLAUDE_MODELS = [
         created_at="2026-06-09T00:00:00Z",
     ),
     ModelResponse(
+        id="claude-fable-5.5",
+        display_name="Claude Fable 5.5",
+        created_at="2026-10-01T00:00:00Z",
+    ),
+    ModelResponse(
         id="claude-opus-4-20250514",
         display_name="Claude Opus 4",
         created_at="2025-05-14T00:00:00Z",
@@ -124,6 +129,11 @@ SUPPORTED_CLAUDE_MODELS = [
         id="claude-haiku-4-20250514",
         display_name="Claude Haiku 4",
         created_at="2025-05-14T00:00:00Z",
+    ),
+    ModelResponse(
+        id="claude-3-7-sonnet-20250219",
+        display_name="Claude 3.7 Sonnet",
+        created_at="2025-02-19T00:00:00Z",
     ),
     ModelResponse(
         id="claude-3-opus-20240229",
