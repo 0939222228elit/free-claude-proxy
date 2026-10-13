@@ -1,6 +1,6 @@
 """Shared defaults used by config models and provider adapters."""
 
-DEFAULT_MODEL = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
+DEFAULT_MODEL = "gemini/gemini-2.5-flash"
 
 # Client context allocation when the provider reports no model limit.
 DEFAULT_MODEL_CONTEXT_TOKENS = 200_000
