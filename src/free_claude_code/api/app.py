@@ -29,6 +29,7 @@ from free_claude_code.core.version import package_version
 from .admin_cache import AdminNoStoreMiddleware, attach_admin_no_store
 from .admin_routes import router as admin_router
 from .code_sessions_routes import router as code_router
+from .coder_agent import router as coder_router
 from .ports import ApiServices
 from .request_errors import ordinary_application_error_response
 from .request_ids import (
@@ -53,6 +54,7 @@ def create_app(services: ApiServices) -> FastAPI:
 
     app.include_router(admin_router)
     app.include_router(code_router)
+    app.include_router(coder_router)
     app.include_router(router)
 
     @app.exception_handler(CodeError)
