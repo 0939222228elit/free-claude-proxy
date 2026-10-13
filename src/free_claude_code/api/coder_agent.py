@@ -1,11 +1,11 @@
 """Autonomous Claude Code Studio PWA with Multi-Cloud Storage: GitHub, Hugging Face & Supabase."""
 
+import asyncio
 import io
 import os
 import re
 import shutil
 import subprocess
-import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from huggingface_hub import HfApi
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/coder", tags=["coder"])
@@ -42,7 +43,7 @@ CLAUDE_SVG_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 51
 
 class CoderTaskRequest(BaseModel):
     project_name: str = Field(min_length=2, max_length=64)
-    prompt: str = Field(min_length=5, max_length=16000)
+    prompt: str = Field(min_length=2, max_length=16000)
     model: str = Field(default="claude-fable-5.5")
     auth_key: str = Field(min_length=1)
     push_github: bool = Field(default=True)
@@ -121,7 +122,7 @@ async def _upload_to_supabase(filename: str, data: bytes, content_type: str = "a
         "x-upsert": "true",
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(url, headers=headers, content=data)
             if resp.status_code in (200, 201):
                 return f"{url_base}/storage/v1/object/public/{bucket}/{filename}"
@@ -130,10 +131,7 @@ async def _upload_to_supabase(filename: str, data: bytes, content_type: str = "a
     return None
 
 
-async def _create_and_push_github(
-    run_dir: Path, project_name: str, is_private: bool = False, description: str = ""
-) -> str | None:
-    """Create a GitHub repository and push code to it."""
+def _push_to_github_sync(run_dir: Path, project_name: str, is_private: bool, description: str) -> str | None:
     gh_token = os.getenv("GITHUB_TOKEN", "")
     gh_user = os.getenv("GITHUB_USERNAME", "0939222228elit")
     if not gh_token:
@@ -152,16 +150,16 @@ async def _create_and_push_github(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(api_url, headers=headers, json=payload)
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(api_url, headers=headers, json=payload)
             if resp.status_code not in (201, 422):
                 return None
 
         remote_url = f"https://{gh_user}:{gh_token}@github.com/{gh_user}/{project_name}.git"
-        subprocess.run(["git", "remote", "remove", "origin"], cwd=run_dir, capture_output=True)
-        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=run_dir, check=True, capture_output=True)
-        subprocess.run(["git", "branch", "-M", "main"], cwd=run_dir, check=True, capture_output=True)
-        res = subprocess.run(["git", "push", "-u", "origin", "main", "--force"], cwd=run_dir, capture_output=True, text=True)
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=run_dir, capture_output=True, timeout=5)
+        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=run_dir, check=True, capture_output=True, timeout=5)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=run_dir, check=True, capture_output=True, timeout=5)
+        res = subprocess.run(["git", "push", "-u", "origin", "main", "--force"], cwd=run_dir, capture_output=True, text=True, timeout=20)
         if res.returncode == 0:
             return f"https://github.com/{gh_user}/{project_name}"
     except Exception:
@@ -169,37 +167,36 @@ async def _create_and_push_github(
     return None
 
 
-async def _upload_to_huggingface(zip_path: Path, zip_filename: str) -> str | None:
-    """Upload project ZIP to Hugging Face Datasets repository."""
+async def _create_and_push_github(
+    run_dir: Path, project_name: str, is_private: bool = False, description: str = ""
+) -> str | None:
+    return await asyncio.to_thread(_push_to_github_sync, run_dir, project_name, is_private, description)
+
+
+def _upload_to_huggingface_sync(zip_data: bytes, zip_filename: str) -> str | None:
+    """Fast direct upload to Hugging Face Datasets repository via HfApi in < 1 second."""
     hf_token = os.getenv("HF_TOKEN", "")
     hf_user = os.getenv("HF_USERNAME", "Klode2026")
     hf_dataset = os.getenv("HF_DATASET", "agent-projects")
     if not hf_token:
         return None
 
-    repo_url = f"https://{hf_user}:{hf_token}@huggingface.co/datasets/{hf_user}/{hf_dataset}"
+    try:
+        api = HfApi(token=hf_token)
+        api.upload_file(
+            path_or_fileobj=zip_data,
+            path_in_repo=zip_filename,
+            repo_id=f"{hf_user}/{hf_dataset}",
+            repo_type="dataset",
+            commit_message=f"Store {zip_filename}",
+        )
+        return f"https://huggingface.co/datasets/{hf_user}/{hf_dataset}/resolve/main/{zip_filename}"
+    except Exception:
+        return None
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        clone_dir = Path(tmpdir) / "hf_repo"
-        try:
-            res = subprocess.run(["git", "clone", "--depth", "1", repo_url, str(clone_dir)], capture_output=True, text=True)
-            if res.returncode != 0:
-                return None
 
-            dest_file = clone_dir / zip_filename
-            shutil.copy2(zip_path, dest_file)
-
-            subprocess.run(["git", "config", "user.name", hf_user], cwd=clone_dir, check=True)
-            subprocess.run(["git", "config", "user.email", "klode@local"], cwd=clone_dir, check=True)
-            subprocess.run(["git", "add", "."], cwd=clone_dir, check=True)
-            subprocess.run(["git", "commit", "-m", f"Store {zip_filename}"], cwd=clone_dir, check=True)
-            push_res = subprocess.run(["git", "push", "origin", "main"], cwd=clone_dir, capture_output=True, text=True)
-            if push_res.returncode == 0:
-                return f"https://huggingface.co/datasets/{hf_user}/{hf_dataset}/resolve/main/{zip_filename}"
-        except Exception:
-            pass
-
-    return None
+async def _upload_to_huggingface(zip_data: bytes, zip_filename: str) -> str | None:
+    return await asyncio.to_thread(_upload_to_huggingface_sync, zip_data, zip_filename)
 
 
 @router.get("/icon.svg")
@@ -323,12 +320,6 @@ async def coder_dashboard(request: Request):
       background: #3a3430;
       border-radius: 4px;
     }}
-    .cursor-blink {{
-      animation: blink 1s step-end infinite;
-    }}
-    @keyframes blink {{
-      50% {{ opacity: 0; }}
-    }}
   </style>
 </head>
 <body class="min-h-screen flex flex-col overflow-x-hidden selection:bg-[#d97757]/30 selection:text-white">
@@ -427,7 +418,7 @@ async def coder_dashboard(request: Request):
         </div>
 
         <div class="text-[#8a8277] text-[11px]">
-          Введите задачу на разработку ниже. Агент спроектирует архитектуру, напишет модули, сделает коммит и опубликует код.
+          Введите задачу на разработку или задайте любой вопрос. Агент ответит в чате или сгенерирует проект с файлами и опубликует в облако.
         </div>
 
         <!-- Thinking Process Block (Collapsible) -->
@@ -443,24 +434,24 @@ async def coder_dashboard(request: Request):
         </div>
 
         <!-- Tool Calls & Execution Steps -->
-        <div id="executionSteps" class="space-y-1.5"></div>
+        <div id="executionSteps" class="space-y-2"></div>
 
       </div>
 
       <!-- Quick Action Chips -->
       <div class="bg-[#141210] px-3 py-1.5 border-t border-[#26221e] flex items-center gap-1.5 overflow-x-auto custom-scrollbar text-[11px]">
         <span class="text-[#6b645c] text-[10px] uppercase font-mono mr-1">Темы:</span>
+        <button onclick="setPrompt('Привет! Расскажи подробно, что ты умеешь и как с тобой работать.', '')"
+          class="px-2 py-0.5 rounded bg-[#1e1b19] hover:bg-[#2c2622] text-[#e08264] whitespace-nowrap border border-[#3e2e25] transition">
+          💬 Что ты умеешь?
+        </button>
         <button onclick="setPrompt('Создай Telegram-бота на Python (aiogram 3) для отслеживания цен криптовалют с базой SQLite, кнопками и графиком', 'crypto_bot')"
           class="px-2 py-0.5 rounded bg-[#1e1b19] hover:bg-[#2c2622] text-[#beb5a8] whitespace-nowrap border border-[#2e2824] transition">
-          🤖 Telegram Crypto Bot
+          🤖 Telegram Bot
         </button>
         <button onclick="setPrompt('Создай REST API на FastAPI с авторизацией через JWT, Swagger документацией и тестами pytest', 'fastapi_auth')"
           class="px-2 py-0.5 rounded bg-[#1e1b19] hover:bg-[#2c2622] text-[#beb5a8] whitespace-nowrap border border-[#2e2824] transition">
-          ⚡ FastAPI REST JWT
-        </button>
-        <button onclick="setPrompt('Создай парсер новостей на Python с BeautifulSoup, асинхронным сбором и сохранением в CSV и JSON', 'news_scraper')"
-          class="px-2 py-0.5 rounded bg-[#1e1b19] hover:bg-[#2c2622] text-[#beb5a8] whitespace-nowrap border border-[#2e2824] transition">
-          🕷️ Async Web Scraper
+          ⚡ FastAPI REST
         </button>
       </div>
 
@@ -478,7 +469,7 @@ async def coder_dashboard(request: Request):
         <div class="flex items-center gap-2">
           <div class="flex-1 flex items-start gap-2 bg-[#0e0d0c] border border-[#2d2824] rounded-xl px-3 py-2 focus-within:border-[#d97757] transition">
             <span class="text-[#d97757] font-mono font-bold select-none text-sm leading-6">&gt;</span>
-            <textarea id="promptInput" rows="2" placeholder="Опишите задачу или используйте /help..."
+            <textarea id="promptInput" rows="2" placeholder="Опишите задачу или задайте вопрос..."
               class="w-full bg-transparent text-xs font-mono text-[#f5f2eb] placeholder-[#5c554e] focus:outline-none resize-none leading-relaxed"></textarea>
           </div>
           <button id="submitBtn" onclick="runAgent()"
@@ -524,7 +515,7 @@ async def coder_dashboard(request: Request):
 
       <!-- File Tabs Horizontal Scroll -->
       <div id="fileTabsContainer" class="bg-[#141210] border-b border-[#24201c] flex items-center gap-1 px-3 py-1.5 overflow-x-auto custom-scrollbar text-xs font-mono">
-        <span class="text-[#615a52] text-[11px] py-1">Файлы проекта появятся здесь после генерации</span>
+        <span class="text-[#615a52] text-[11px] py-1">Сгенерированные файлы появятся здесь</span>
       </div>
 
       <!-- Code Syntax Viewer Screen -->
@@ -711,16 +702,26 @@ async def coder_dashboard(request: Request):
 
     function addStep(icon, text, type = 'info') {{
       const steps = document.getElementById('executionSteps');
+      const termBody = document.getElementById('terminalBody');
+
+      if (type === 'chat') {{
+        const card = document.createElement('div');
+        card.className = "p-3.5 rounded-xl bg-[#181614] border border-[#2e2824] text-xs text-[#e8e2d8] leading-relaxed shadow-sm select-text my-2";
+        card.innerHTML = `<div class="text-[10px] uppercase font-mono text-[#d97757] font-bold mb-1.5 flex items-center gap-1.5"><span>✳</span> Claude Code</div><div class="whitespace-pre-wrap">${{text}}</div>`;
+        steps.appendChild(card);
+        termBody.scrollTop = termBody.scrollHeight;
+        return;
+      }}
+
       const div = document.createElement('div');
       let color = 'text-[#c7bfb3]';
       if (type === 'success') color = 'text-emerald-400 font-medium';
       if (type === 'error') color = 'text-rose-400 font-medium';
       if (type === 'highlight') color = 'text-[#e68565] font-semibold';
-      div.className = `flex items-center gap-2 text-xs ${{color}}`;
-      div.innerHTML = `<span>${{icon}}</span><span>${{text}}</span>`;
+      div.className = `flex items-start gap-2 text-xs ${{color}}`;
+      div.innerHTML = `<span class="flex-shrink-0 mt-0.5">${{icon}}</span><span class="flex-1">${{text}}</span>`;
       steps.appendChild(div);
       
-      const termBody = document.getElementById('terminalBody');
       termBody.scrollTop = termBody.scrollHeight;
     }}
 
@@ -734,14 +735,14 @@ async def coder_dashboard(request: Request):
       const uploadHf = document.getElementById('settingUploadHf').checked;
 
       if (!prompt) {{
-        alert('Пожалуйста, введите задачу для агента!');
+        alert('Пожалуйста, введите задачу или вопрос для агента!');
         return;
       }}
 
       // Handle Slash Commands
       if (prompt.startsWith('/')) {{
         if (prompt === '/help') {{
-          addStep('ℹ️', 'Команды: /help (помощь), /clear (очистить), /model (выбрать модель), /git (статус)', 'highlight');
+          addStep('ℹ️', 'Команды: /help (помощь), /clear (очистить экран), /model (выбрать модель), /git (настройки)', 'highlight');
           document.getElementById('promptInput').value = '';
           return;
         }}
@@ -768,10 +769,10 @@ async def coder_dashboard(request: Request):
       submitBtn.disabled = true;
       termStatusPill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-[#d97757] animate-ping"></span> running';
       
-      addStep('⚡', `Запуск задачи для проекта "${{projName}}" через модель ${{model}}...`, 'highlight');
+      addStep('⚡', `Запрос: "${{prompt.slice(0, 80)}}${{prompt.length > 80 ? '...' : ''}}"`, 'highlight');
       thinkingBlock.classList.remove('hidden');
       thinkingTitle.textContent = 'Рассуждения модели (Thinking)...';
-      thinkingContent.textContent = 'Анализ спецификации задачи и планирование архитектуры файлов...';
+      thinkingContent.textContent = 'Обработка запроса моделью ' + model + '...';
 
       let seconds = 0;
       clearInterval(timerInterval);
@@ -781,9 +782,13 @@ async def coder_dashboard(request: Request):
       }}, 1000);
 
       try {{
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 95000); // 95s guard for Cloudflare 100s
+
         const res = await fetch('/coder/api/generate', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
+          signal: controller.signal,
           body: JSON.stringify({{
             project_name: projName,
             prompt: prompt,
@@ -795,6 +800,7 @@ async def coder_dashboard(request: Request):
           }})
         }});
 
+        clearTimeout(timeoutId);
         clearInterval(timerInterval);
         const data = await res.json();
 
@@ -804,21 +810,33 @@ async def coder_dashboard(request: Request):
           return;
         }}
 
+        // Mode 1: Conversational Chat
+        if (data.status === 'chat') {{
+          thinkingBlock.classList.add('hidden');
+          addStep('💬', data.message, 'chat');
+          termStatusPill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> ready';
+          document.getElementById('promptInput').value = '';
+          return;
+        }}
+
+        // Mode 2: Project Generated
         thinkingTitle.textContent = '✓ Рассуждения завершены';
-        thinkingContent.textContent += '\\n\\nСгенерированы модули:\\n' + (data.files || []).map(f => '• ' + f).join('\\n');
+        thinkingContent.textContent += '\\n\\nСгенерированы файлы:\\n' + (data.files || []).map(f => '• ' + f).join('\\n');
 
         addStep('✓', `Успешно сгенерировано файлов: ${{data.files.length}}`, 'success');
-        addStep('📦', `Git commit: ${{data.git_commit}}`, 'info');
+        if (data.git_commit && data.git_commit !== 'no-git') {{
+          addStep('📦', `Git: ${{data.git_commit}}`, 'info');
+        }}
 
         if (data.github_url) {{
-          addStep('🐙', `GitHub репозиторий опубликован: <a href="${{data.github_url}}" target="_blank" class="underline text-violet-400">${{data.github_url}}</a>`, 'success');
+          addStep('🐙', `GitHub репозиторий: <a href="${{data.github_url}}" target="_blank" class="underline text-violet-400 font-bold">${{data.github_url}}</a>`, 'success');
           const ghLink = document.getElementById('ghRepoLink');
           ghLink.href = data.github_url;
           ghLink.classList.remove('hidden');
         }}
 
         if (data.hf_url) {{
-          addStep('🤗', `Hugging Face (50GB Cloud): <a href="${{data.hf_url}}" target="_blank" class="underline text-yellow-400">Скачать архив</a>`, 'success');
+          addStep('🤗', `Hugging Face (50GB Cloud): <a href="${{data.hf_url}}" target="_blank" class="underline text-yellow-400 font-bold">Скачать ZIP</a>`, 'success');
           const hfLink = document.getElementById('hfDownloadLink');
           hfLink.href = data.hf_url;
           hfLink.classList.remove('hidden');
@@ -841,7 +859,11 @@ async def coder_dashboard(request: Request):
 
       }} catch (err) {{
         clearInterval(timerInterval);
-        addStep('❌', 'Сетевая ошибка: ' + err.message, 'error');
+        if (err.name === 'AbortError') {{
+          addStep('⚠️', 'Запрос занял слишком много времени (>90с). Попробуйте сформулировать задачу более точечно.', 'error');
+        }} else {{
+          addStep('❌', 'Сетевая ошибка: ' + err.message + '. Проверьте стабильность соединения.', 'error');
+        }}
         termStatusPill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span> error';
       }} finally {{
         submitBtn.disabled = false;
@@ -977,7 +999,7 @@ async def coder_dashboard(request: Request):
 
 @router.post("/api/generate")
 async def generate_project(task: CoderTaskRequest, request: Request):
-    """Run autonomous project generation, git commit, GitHub repo push, HF upload and Supabase backup."""
+    """Run autonomous project generation or instant conversational reply with parallel multi-cloud uploads."""
     _verify_auth(task.auth_key, request)
 
     project_slug = _sanitize_project_name(task.project_name)
@@ -986,7 +1008,7 @@ async def generate_project(task: CoderTaskRequest, request: Request):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Ask our local LLM proxy (Claude Fable 5.5) to produce the project code
+        # 1. Ask local LLM proxy (Claude Fable 5.5)
         proxy_url = f"http://127.0.0.1:{os.getenv('PORT', '8082')}/v1/messages"
         token_to_use = _get_server_token(request)
         headers = {
@@ -995,30 +1017,31 @@ async def generate_project(task: CoderTaskRequest, request: Request):
             "content-type": "application/json",
         }
         system_instruction = (
-            "You are Claude Code, an autonomous expert full-stack software engineer. "
-            "When given a project specification, you design the architecture and write complete, fully functional, production-ready code. "
-            "IMPORTANT RULES:\n"
-            "1. Output every single project file inside a fenced code block with the exact relative filename in the header comment, e.g.:\n"
+            "You are Claude Code, an autonomous expert full-stack AI software engineer by Anthropic. "
+            "You operate in two modes:\n"
+            "1. CONVERSATIONAL MODE: If the user is asking a question, greeting you ('привет', 'hello', 'что ты умеешь', etc.), "
+            "or discussing a topic without asking to generate an application, reply conversationally and helpful directly in Markdown.\n"
+            "2. PROJECT GENERATION MODE: If the user is asking to build, write, create, or generate a software project, program, bot, script, or application:\n"
+            "- First give a brief architecture overview.\n"
+            "- Output EVERY SINGLE project file inside a fenced code block with the relative filename in the header comment, e.g.:\n"
             "```python\n# file: main.py\n<complete code>\n```\n"
-            "2. Always include a README.md and requirements.txt (or package.json if JS/TS).\n"
-            "3. Do NOT omit any code or leave placeholders like 'TODO'. Write full, runnable implementations.\n"
-            "4. Provide a brief summary of what was built at the end."
+            "- Always include README.md and requirements.txt (or package.json if JS/TS).\n"
+            "- Write complete, production-ready code with no placeholders or TODOs."
         )
 
         user_message = (
             f"Project Name: {project_slug}\n"
-            f"Task Specification:\n{task.prompt}\n\n"
-            "Generate the complete project files now with full code."
+            f"User Request:\n{task.prompt}"
         )
 
         payload = {
             "model": task.model,
-            "max_tokens": 8192,
+            "max_tokens": 6144,
             "system": system_instruction,
             "messages": [{"role": "user", "content": user_message}],
         }
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=80.0) as client:
             resp = await client.post(proxy_url, headers=headers, json=payload)
             if resp.status_code != 200:
                 raise HTTPException(
@@ -1033,12 +1056,19 @@ async def generate_project(task: CoderTaskRequest, request: Request):
         if not full_text:
             raise HTTPException(status_code=500, detail="Модель вернула пустой ответ")
 
-        # 3. Parse files and write to temporary directory
+        # 3. Check if files were generated
         extracted_files = _extract_files_from_markdown(full_text)
+        
+        # If no project code files were generated, it's a conversational answer!
         if not extracted_files:
-            extracted_files["main.py"] = full_text
-            extracted_files["README.md"] = f"# {project_slug}\n\nGenerated for prompt:\n{task.prompt}"
+            return JSONResponse(
+                content={
+                    "status": "chat",
+                    "message": full_text,
+                }
+            )
 
+        # 4. Save files to temporary directory
         created_files = []
         for rel_path, code in extracted_files.items():
             dest = run_dir / rel_path
@@ -1046,19 +1076,19 @@ async def generate_project(task: CoderTaskRequest, request: Request):
             dest.write_text(code, encoding="utf-8")
             created_files.append(rel_path)
 
-        # 4. Initialize Git repo and make initial commit
+        # 5. Initialize Git repo and make initial commit
         git_commit_hash = "no-git"
         try:
-            subprocess.run(["git", "init"], cwd=run_dir, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Claude Code Agent"], cwd=run_dir, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "claude-code@agent.local"], cwd=run_dir, check=True, capture_output=True)
-            subprocess.run(["git", "add", "."], cwd=run_dir, check=True, capture_output=True)
-            res = subprocess.run(["git", "commit", "-m", f"Initial commit: {project_slug} via {task.model}"], cwd=run_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "init"], cwd=run_dir, check=True, capture_output=True, timeout=5)
+            subprocess.run(["git", "config", "user.name", "Claude Code Agent"], cwd=run_dir, check=True, capture_output=True, timeout=5)
+            subprocess.run(["git", "config", "user.email", "claude-code@agent.local"], cwd=run_dir, check=True, capture_output=True, timeout=5)
+            subprocess.run(["git", "add", "."], cwd=run_dir, check=True, capture_output=True, timeout=5)
+            res = subprocess.run(["git", "commit", "-m", f"Initial commit: {project_slug} via {task.model}"], cwd=run_dir, check=True, capture_output=True, text=True, timeout=5)
             git_commit_hash = res.stdout.strip().split("\n")[0]
         except Exception:
             pass
 
-        # 5. Create ZIP archive
+        # 6. Create ZIP archive
         zip_filename = f"{project_slug}_{timestamp}.zip"
         zip_path = Path("/tmp") / zip_filename
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -1071,23 +1101,33 @@ async def generate_project(task: CoderTaskRequest, request: Request):
 
         zip_data = zip_path.read_bytes()
 
-        # 6. Publish to GitHub (if enabled)
-        github_url = None
+        # 7. PARALLEL CLOUD UPLOADS (GitHub + Hugging Face + Supabase)
+        upload_tasks = []
+
+        # Task A: GitHub push
         if task.push_github:
-            github_url = await _create_and_push_github(
-                run_dir,
-                project_name=project_slug,
-                is_private=task.github_private,
-                description=task.prompt[:200],
+            upload_tasks.append(
+                _create_and_push_github(
+                    run_dir,
+                    project_name=project_slug,
+                    is_private=task.github_private,
+                    description=task.prompt[:200],
+                )
             )
+        else:
+            upload_tasks.append(asyncio.sleep(0, result=None))
 
-        # 7. Upload to Hugging Face (50 GB Cloud Storage)
-        hf_url = None
+        # Task B: Hugging Face upload (fast HfApi < 1s)
         if task.upload_hf:
-            hf_url = await _upload_to_huggingface(zip_path, zip_filename)
+            upload_tasks.append(_upload_to_huggingface(zip_data, zip_filename))
+        else:
+            upload_tasks.append(asyncio.sleep(0, result=None))
 
-        # 8. Upload to Supabase Storage (backup)
-        download_url = await _upload_to_supabase(zip_filename, zip_data, content_type="application/zip")
+        # Task C: Supabase Storage backup
+        upload_tasks.append(_upload_to_supabase(zip_filename, zip_data, content_type="application/zip"))
+
+        # Run all 3 concurrently in parallel
+        github_url, hf_url, download_url = await asyncio.gather(*upload_tasks)
 
         # Cleanup zip file
         if zip_path.exists():
@@ -1095,7 +1135,7 @@ async def generate_project(task: CoderTaskRequest, request: Request):
 
         return JSONResponse(
             content={
-                "status": "success",
+                "status": "project",
                 "project_name": project_slug,
                 "zip_filename": zip_filename,
                 "github_url": github_url,
@@ -1132,7 +1172,7 @@ async def list_supabase_projects():
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code != 200:
                 return JSONResponse(content=[], status_code=200)
