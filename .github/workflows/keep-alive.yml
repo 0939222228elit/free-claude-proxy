@@ -12,4 +12,9 @@ jobs:
       - name: Ping Render Service Health
         run: |
           response=$(curl -s https://free-claude-code-proxy-kwbo.onrender.com/health)
-          echo "Health response: $response"
+          echo "Render Health response: $response"
+
+      - name: Ping Supabase Storage & Database
+        run: |
+          sb_response=$(curl -s https://hrxmvitapcwfubcdaomu.supabase.co/storage/v1/object/public/projects/test.txt)
+          echo "Supabase response: $sb_response"
