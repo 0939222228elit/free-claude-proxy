@@ -1,6 +1,6 @@
 """Shared defaults used by config models and provider adapters."""
 
-DEFAULT_MODEL = "gemini/gemini-2.5-flash"
+DEFAULT_MODEL = "gemini/gemini-3.8-flash"
 
 # Client context allocation when the provider reports no model limit.
 DEFAULT_MODEL_CONTEXT_TOKENS = 200_000
