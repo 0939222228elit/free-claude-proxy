@@ -14,7 +14,10 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
-from huggingface_hub import HfApi
+try:
+    from huggingface_hub import HfApi
+except ImportError:
+    HfApi = None
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/coder", tags=["coder"])
@@ -178,7 +181,7 @@ def _upload_to_huggingface_sync(zip_data: bytes, zip_filename: str) -> str | Non
     hf_token = os.getenv("HF_TOKEN", "")
     hf_user = os.getenv("HF_USERNAME", "Klode2026")
     hf_dataset = os.getenv("HF_DATASET", "agent-projects")
-    if not hf_token:
+    if not hf_token or HfApi is None:
         return None
 
     try:

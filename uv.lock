@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.14.7"
 
 [[package]]
@@ -609,6 +609,7 @@ dependencies = [
     { name = "grpcio-tools" },
     { name = "httpx", extra = ["socks"] },
     { name = "httpx2", extra = ["socks"] },
+    { name = "huggingface-hub" },
     { name = "json5" },
     { name = "jsonschema" },
     { name = "loguru" },
@@ -664,6 +665,7 @@ requires-dist = [
     { name = "grpcio-tools", specifier = ">=1.81.1" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
     { name = "httpx2", extras = ["socks"], specifier = ">=2.7.0,<3" },
+    { name = "huggingface-hub", specifier = ">=2.2.0" },
     { name = "json5", specifier = ">=0.15.0" },
     { name = "jsonschema", specifier = ">=4.25.0" },
     { name = "librosa", marker = "extra == 'voice-local'", specifier = ">=1.0.0" },
