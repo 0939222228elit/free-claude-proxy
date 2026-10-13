@@ -49,9 +49,15 @@ class CoderTaskRequest(BaseModel):
     prompt: str = Field(min_length=2, max_length=16000)
     model: str = Field(default="claude-fable-5.5")
     auth_key: str = Field(min_length=1)
-    push_github: bool = Field(default=True)
+    push_github: bool = Field(default=False)
     github_private: bool = Field(default=False)
     upload_hf: bool = Field(default=True)
+
+
+class PublishGithubRequest(BaseModel):
+    project_name: str = Field(min_length=2, max_length=64)
+    auth_key: str = Field(min_length=1)
+    is_private: bool = Field(default=False)
 
 
 def _get_server_token(request: Request) -> str:
@@ -176,30 +182,48 @@ async def _create_and_push_github(
     return await asyncio.to_thread(_push_to_github_sync, run_dir, project_name, is_private, description)
 
 
-def _upload_to_huggingface_sync(zip_data: bytes, zip_filename: str) -> str | None:
-    """Fast direct upload to Hugging Face Datasets repository via HfApi in < 1 second."""
+def _upload_to_huggingface_sync(run_dir: Path, zip_data: bytes, zip_filename: str, project_slug: str) -> dict[str, str | None]:
+    """Fast direct upload to Hugging Face Workspace (uncompressed files) and Archives (ZIP)."""
     hf_token = os.getenv("HF_TOKEN", "")
     hf_user = os.getenv("HF_USERNAME", "Klode2026")
     hf_dataset = os.getenv("HF_DATASET", "agent-projects")
+    result = {"hf_project_url": None, "hf_zip_url": None}
     if not hf_token or HfApi is None:
-        return None
+        return result
 
     try:
         api = HfApi(token=hf_token)
-        api.upload_file(
-            path_or_fileobj=zip_data,
-            path_in_repo=zip_filename,
+        # 1. Upload uncompressed folder for live browser inspection
+        api.upload_folder(
+            folder_path=str(run_dir),
+            path_in_repo=f"projects/{project_slug}",
             repo_id=f"{hf_user}/{hf_dataset}",
             repo_type="dataset",
-            commit_message=f"Store {zip_filename}",
+            commit_message=f"Workspace: {project_slug}",
         )
-        return f"https://huggingface.co/datasets/{hf_user}/{hf_dataset}/resolve/main/{zip_filename}"
-    except Exception:
-        return None
+        result["hf_project_url"] = f"https://huggingface.co/datasets/{hf_user}/{hf_dataset}/tree/main/projects/{project_slug}"
+    except Exception as e:
+        print(f"[HF Workspace Upload Warning]: {e}")
+
+    try:
+        api = HfApi(token=hf_token)
+        # 2. Upload zip archive for 1-click download
+        api.upload_file(
+            path_or_fileobj=zip_data,
+            path_in_repo=f"archives/{zip_filename}",
+            repo_id=f"{hf_user}/{hf_dataset}",
+            repo_type="dataset",
+            commit_message=f"Archive: {zip_filename}",
+        )
+        result["hf_zip_url"] = f"https://huggingface.co/datasets/{hf_user}/{hf_dataset}/resolve/main/archives/{zip_filename}"
+    except Exception as e:
+        print(f"[HF Archive Upload Warning]: {e}")
+
+    return result
 
 
-async def _upload_to_huggingface(zip_data: bytes, zip_filename: str) -> str | None:
-    return await asyncio.to_thread(_upload_to_huggingface_sync, zip_data, zip_filename)
+async def _upload_to_huggingface(run_dir: Path, zip_data: bytes, zip_filename: str, project_slug: str) -> dict[str, str | None]:
+    return await asyncio.to_thread(_upload_to_huggingface_sync, run_dir, zip_data, zip_filename, project_slug)
 
 
 @router.get("/icon.svg")
@@ -501,18 +525,22 @@ async def coder_dashboard(request: Request):
             class="px-2 py-1 rounded bg-[#25211e] hover:bg-[#332e2a] text-[#c9c1b6] text-xs font-medium border border-[#352f2a] flex items-center gap-1 transition" title="Скопировать код">
             <span>📋</span> <span class="hidden sm:inline">Копировать</span>
           </button>
-          <a id="ghRepoLink" href="#" target="_blank"
-            class="hidden px-2.5 py-1 rounded bg-[#1e1b19] hover:bg-[#2b2622] text-[#f5f2eb] text-xs font-medium border border-[#38312b] flex items-center gap-1 transition">
-            <span>🐙</span> <span class="hidden sm:inline">GitHub</span>
+          <a id="hfProjectLink" href="#" target="_blank"
+            class="hidden px-2.5 py-1 rounded bg-[#3b2f1e] hover:bg-[#4a3b26] text-[#facc15] text-xs font-medium border border-[#524229] flex items-center gap-1 transition" title="Песочница с файлами в Hugging Face">
+            <span>🤗</span> <span class="hidden sm:inline">HF Workspace</span>
           </a>
           <a id="hfDownloadLink" href="#" target="_blank"
-            class="hidden px-2.5 py-1 rounded bg-[#3b2f1e] hover:bg-[#4a3b26] text-[#facc15] text-xs font-medium border border-[#524229] flex items-center gap-1 transition">
-            <span>🤗</span> <span class="hidden sm:inline">HF Cloud</span>
-          </a>
-          <a id="sbDownloadLink" href="#" target="_blank"
-            class="hidden px-2.5 py-1 rounded bg-[#1e2f25] hover:bg-[#293d31] text-emerald-300 text-xs font-medium border border-[#2b4434] flex items-center gap-1 transition">
+            class="hidden px-2.5 py-1 rounded bg-[#25211e] hover:bg-[#332e2a] text-[#facc15] text-xs font-medium border border-[#352f2a] flex items-center gap-1 transition" title="Скачать ZIP">
             <span>📥</span> <span class="hidden sm:inline">ZIP</span>
           </a>
+          <a id="ghRepoLink" href="#" target="_blank"
+            class="hidden px-2.5 py-1 rounded bg-[#1e1b19] hover:bg-[#2b2622] text-[#f5f2eb] text-xs font-medium border border-[#38312b] flex items-center gap-1 transition" title="Открыть в GitHub">
+            <span>🐙</span> <span class="hidden sm:inline">GitHub</span>
+          </a>
+          <button id="btnPublishGithub" onclick="publishCurrentProjectToGithub()"
+            class="hidden px-2.5 py-1 rounded bg-[#1b3323] hover:bg-[#254630] text-emerald-300 text-xs font-bold border border-[#2b5938] flex items-center gap-1.5 transition shadow-sm animate-pulse" title="Создать репозиторий в GitHub">
+            <span>🚀</span> <span>В GitHub</span>
+          </button>
         </div>
       </div>
 
@@ -568,26 +596,30 @@ async def coder_dashboard(request: Request):
           <label class="block text-[#a69e92] mb-1">Модель интеллекта</label>
           <select id="settingModelSelect"
             class="w-full bg-[#100f0e] border border-[#2d2824] rounded-lg p-2.5 text-white focus:outline-none focus:border-[#d97757]">
-            <option value="claude-fable-5.5" selected>Claude Fable 5.5 (Рекомендуется)</option>
-            <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
-            <option value="claude-opus-4-20250514">Claude Opus 4</option>
-            <option value="gemini/gemini-3.8-flash">Gemini 3.8 Flash</option>
+            <option value="claude-fable-5.5" selected>⚡ Mistral Codestral (Кодовый эксперт, 0.5с) [Рекомендуется]</option>
+            <option value="groq/qwen/qwen3.8-27b">🚀 Groq Qwen 3.8 (Ультра-скорость 35мс)</option>
+            <option value="groq/openai/gpt-oss-120b">🧠 Groq GPT-OSS 120B (Глубокие рассуждения)</option>
+            <option value="gemini/gemini-3.5-flash">🌟 Google Gemini 3.5 Flash (Широкий контекст)</option>
+            <option value="open_router/nvidia/nemotron-3.5-lightning:free">🛡️ NVIDIA Nemotron 3.5 (Резерв)</option>
           </select>
         </div>
 
-        <div class="p-3 rounded-xl bg-[#131110] border border-[#292420] space-y-2">
+        <div class="p-3 rounded-xl bg-[#131110] border border-[#292420] space-y-2.5">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input id="settingPushGithub" type="checkbox" checked class="rounded text-[#d97757]">
-            <span class="text-[#c7bfb3]">Создавать репозиторий в GitHub (0939222228elit)</span>
+            <input id="settingUploadHf" type="checkbox" checked class="rounded text-[#d97757]">
+            <span class="text-[#c7bfb3] font-medium">🤗 Песочница Hugging Face (50 GB Workspace)</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input id="settingPushGithub" type="checkbox" class="rounded text-[#d97757]">
+            <span class="text-[#c7bfb3]">🚀 Создавать репозиторий в GitHub сразу</span>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
             <input id="settingGhPrivate" type="checkbox" class="rounded text-[#d97757]">
-            <span class="text-[#c7bfb3]">Приватный репозиторий на GitHub</span>
+            <span class="text-[#888]">🔒 Приватный репозиторий на GitHub</span>
           </label>
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input id="settingUploadHf" type="checkbox" checked class="rounded text-[#d97757]">
-            <span class="text-[#c7bfb3]">Хранить ZIP в Hugging Face (50 GB Cloud)</span>
-          </label>
+          <p class="text-[11px] text-[#8c857b] pt-1 border-t border-[#221e1a]">
+            💡 По умолчанию разработка ведется в облачной песочнице Hugging Face без засорения GitHub. Вы можете опубликовать проект на GitHub в 1 клик прямо из панели кода, когда он будет готов!
+          </p>
         </div>
       </div>
 
@@ -667,9 +699,44 @@ async def coder_dashboard(request: Request):
     function saveSettings() {{
       const key = document.getElementById('settingAuthKey').value.trim();
       const model = document.getElementById('settingModelSelect').value;
-      localStorage.setItem('claude_auth_key', key);
+      const pushGh = document.getElementById('settingPushGithub').checked;
+      const ghPriv = document.getElementById('settingGhPrivate').checked;
+      const uploadHf = document.getElementById('settingUploadHf').checked;
+
+      if (key) localStorage.setItem('claude_auth_key', key);
+      localStorage.setItem('claude_selected_model', model);
+      localStorage.setItem('claude_push_github', pushGh ? 'true' : 'false');
+      localStorage.setItem('claude_gh_private', ghPriv ? 'true' : 'false');
+      localStorage.setItem('claude_upload_hf', uploadHf ? 'true' : 'false');
+
       document.getElementById('selectedModelLabel').textContent = model;
       toggleModal('settingsModal');
+    }}
+
+    function initStoredSettings() {{
+      const storedKey = localStorage.getItem('claude_auth_key');
+      if (storedKey) document.getElementById('settingAuthKey').value = storedKey;
+
+      const storedModel = localStorage.getItem('claude_selected_model');
+      if (storedModel && document.getElementById('settingModelSelect')) {{
+        document.getElementById('settingModelSelect').value = storedModel;
+        document.getElementById('selectedModelLabel').textContent = storedModel;
+      }}
+
+      const storedPushGh = localStorage.getItem('claude_push_github');
+      if (storedPushGh !== null && document.getElementById('settingPushGithub')) {{
+        document.getElementById('settingPushGithub').checked = storedPushGh === 'true';
+      }}
+
+      const storedGhPriv = localStorage.getItem('claude_gh_private');
+      if (storedGhPriv !== null && document.getElementById('settingGhPrivate')) {{
+        document.getElementById('settingGhPrivate').checked = storedGhPriv === 'true';
+      }}
+
+      const storedHf = localStorage.getItem('claude_upload_hf');
+      if (storedHf !== null && document.getElementById('settingUploadHf')) {{
+        document.getElementById('settingUploadHf').checked = storedHf === 'true';
+      }}
     }}
 
     function switchMobileView(view) {{
@@ -728,9 +795,52 @@ async def coder_dashboard(request: Request):
       termBody.scrollTop = termBody.scrollHeight;
     }}
 
+    let currentProjectSlug = '';
+
+    async function publishCurrentProjectToGithub() {{
+      const projName = currentProjectSlug || document.getElementById('projNameInput').value.trim() || 'project';
+      const btn = document.getElementById('btnPublishGithub');
+      const oldHtml = btn.innerHTML;
+      btn.innerHTML = '<span>⏳</span> <span>Публикация...</span>';
+      btn.disabled = true;
+
+      try {{
+        const authKey = localStorage.getItem('claude_auth_key') || 'sk-fcc-master-key-2026';
+        const isPrivate = document.getElementById('settingGhPrivate') ? document.getElementById('settingGhPrivate').checked : false;
+        const res = await fetch('/coder/api/publish-github', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            project_name: projName,
+            auth_key: authKey,
+            is_private: isPrivate
+          }})
+        }});
+        const data = await res.json();
+        if (res.ok && data.github_url) {{
+          addStep('🚀', `Опубликовано на GitHub: <a href="${{data.github_url}}" target="_blank" class="underline text-emerald-400 font-bold">${{data.github_url}}</a>`, 'success');
+          const ghLink = document.getElementById('ghRepoLink');
+          if (ghLink) {{
+            ghLink.href = data.github_url;
+            ghLink.classList.remove('hidden');
+          }}
+          btn.classList.add('hidden');
+        }} else {{
+          addStep('❌', 'Ошибка публикации в GitHub: ' + (data.detail || JSON.stringify(data)), 'error');
+          btn.innerHTML = oldHtml;
+          btn.disabled = false;
+        }}
+      }} catch (err) {{
+        addStep('❌', 'Сетевая ошибка публикации: ' + err.message, 'error');
+        btn.innerHTML = oldHtml;
+        btn.disabled = false;
+      }}
+    }}
+
     async function runAgent() {{
       const prompt = document.getElementById('promptInput').value.trim();
       const projName = document.getElementById('projNameInput').value.trim() || 'project';
+      currentProjectSlug = projName;
       const authKey = localStorage.getItem('claude_auth_key') || 'sk-fcc-master-key-2026';
       const model = document.getElementById('settingModelSelect').value;
       const pushGithub = document.getElementById('settingPushGithub').checked;
@@ -831,24 +941,45 @@ async def coder_dashboard(request: Request):
           addStep('📦', `Git: ${{data.git_commit}}`, 'info');
         }}
 
-        if (data.github_url) {{
-          addStep('🐙', `GitHub репозиторий: <a href="${{data.github_url}}" target="_blank" class="underline text-violet-400 font-bold">${{data.github_url}}</a>`, 'success');
-          const ghLink = document.getElementById('ghRepoLink');
-          ghLink.href = data.github_url;
-          ghLink.classList.remove('hidden');
+        if (data.hf_project_url) {{
+          addStep('🤗', `Hugging Face Workspace: <a href="${{data.hf_project_url}}" target="_blank" class="underline text-yellow-400 font-bold">Открыть файлы песочницы</a>`, 'success');
+          const hfProj = document.getElementById('hfProjectLink');
+          if (hfProj) {{
+            hfProj.href = data.hf_project_url;
+            hfProj.classList.remove('hidden');
+          }}
         }}
 
         if (data.hf_url) {{
-          addStep('🤗', `Hugging Face (50GB Cloud): <a href="${{data.hf_url}}" target="_blank" class="underline text-yellow-400 font-bold">Скачать ZIP</a>`, 'success');
+          addStep('📥', `Архив проекта: <a href="${{data.hf_url}}" target="_blank" class="underline text-yellow-300 font-bold">Скачать ZIP</a>`, 'info');
           const hfLink = document.getElementById('hfDownloadLink');
-          hfLink.href = data.hf_url;
-          hfLink.classList.remove('hidden');
+          if (hfLink) {{
+            hfLink.href = data.hf_url;
+            hfLink.classList.remove('hidden');
+          }}
+        }}
+
+        if (data.github_url) {{
+          addStep('🐙', `GitHub репозиторий: <a href="${{data.github_url}}" target="_blank" class="underline text-violet-400 font-bold">${{data.github_url}}</a>`, 'success');
+          const ghLink = document.getElementById('ghRepoLink');
+          if (ghLink) {{
+            ghLink.href = data.github_url;
+            ghLink.classList.remove('hidden');
+          }}
+          const pubBtn = document.getElementById('btnPublishGithub');
+          if (pubBtn) pubBtn.classList.add('hidden');
+        }} else {{
+          const pubBtn = document.getElementById('btnPublishGithub');
+          if (pubBtn) pubBtn.classList.remove('hidden');
+          addStep('✨', 'Проект сохранен в песочнице Hugging Face! Нажмите <b>«🚀 В GitHub»</b> в панели кода, чтобы опубликовать релиз.', 'highlight');
         }}
 
         if (data.download_url) {{
           const sbLink = document.getElementById('sbDownloadLink');
-          sbLink.href = data.download_url;
-          sbLink.classList.remove('hidden');
+          if (sbLink) {{
+            sbLink.href = data.download_url;
+            sbLink.classList.remove('hidden');
+          }}
         }}
 
         // Render Artifacts Tabs
@@ -992,6 +1123,7 @@ async def coder_dashboard(request: Request):
       }} catch (e) {{}}
     }}
 
+    initStoredSettings();
     loadHistoryCount();
   </script>
 </body>
@@ -1104,10 +1236,18 @@ async def generate_project(task: CoderTaskRequest, request: Request):
 
         zip_data = zip_path.read_bytes()
 
-        # 7. PARALLEL CLOUD UPLOADS (GitHub + Hugging Face + Supabase)
+        # Cache project locally in /tmp/coder_cache/{project_slug} for instant 1-click GitHub publish
+        cache_dir = Path("/tmp/coder_cache") / project_slug
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(run_dir, cache_dir, dirs_exist_ok=True)
+        except Exception:
+            pass
+
+        # 7. PARALLEL CLOUD UPLOADS (GitHub + Hugging Face Workspace + Supabase)
         upload_tasks = []
 
-        # Task A: GitHub push
+        # Task A: GitHub push (if explicitly requested)
         if task.push_github:
             upload_tasks.append(
                 _create_and_push_github(
@@ -1120,17 +1260,19 @@ async def generate_project(task: CoderTaskRequest, request: Request):
         else:
             upload_tasks.append(asyncio.sleep(0, result=None))
 
-        # Task B: Hugging Face upload (fast HfApi < 1s)
+        # Task B: Hugging Face upload (Workspace folder + Archive ZIP)
         if task.upload_hf:
-            upload_tasks.append(_upload_to_huggingface(zip_data, zip_filename))
+            upload_tasks.append(_upload_to_huggingface(run_dir, zip_data, zip_filename, project_slug))
         else:
-            upload_tasks.append(asyncio.sleep(0, result=None))
+            upload_tasks.append(asyncio.sleep(0, result={"hf_project_url": None, "hf_zip_url": None}))
 
         # Task C: Supabase Storage backup
         upload_tasks.append(_upload_to_supabase(zip_filename, zip_data, content_type="application/zip"))
 
         # Run all 3 concurrently in parallel
-        github_url, hf_url, download_url = await asyncio.gather(*upload_tasks)
+        github_url, hf_res, download_url = await asyncio.gather(*upload_tasks)
+        hf_project_url = hf_res.get("hf_project_url") if isinstance(hf_res, dict) else None
+        hf_zip_url = hf_res.get("hf_zip_url") if isinstance(hf_res, dict) else None
 
         # Cleanup zip file
         if zip_path.exists():
@@ -1142,7 +1284,8 @@ async def generate_project(task: CoderTaskRequest, request: Request):
                 "project_name": project_slug,
                 "zip_filename": zip_filename,
                 "github_url": github_url,
-                "hf_url": hf_url,
+                "hf_project_url": hf_project_url,
+                "hf_url": hf_zip_url,
                 "download_url": download_url,
                 "files": created_files,
                 "file_contents": extracted_files,
@@ -1152,6 +1295,39 @@ async def generate_project(task: CoderTaskRequest, request: Request):
 
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@router.post("/api/publish-github")
+async def publish_to_github(req: PublishGithubRequest, request: Request):
+    """Publish an existing generated project from local cache or Hugging Face to GitHub."""
+    _verify_auth(req.auth_key, request)
+    project_slug = _sanitize_project_name(req.project_name)
+    cache_dir = Path("/tmp/coder_cache") / project_slug
+
+    if not cache_dir.exists() or not any(cache_dir.iterdir()):
+        matching = sorted(Path("/tmp").glob(f"coder_{project_slug}_*"), reverse=True)
+        if matching:
+            cache_dir = matching[0]
+        else:
+            raise HTTPException(status_code=404, detail="Файлы проекта не найдены для публикации в GitHub")
+
+    # Initialize git if needed
+    try:
+        subprocess.run(["git", "init"], cwd=cache_dir, check=True, capture_output=True, timeout=5)
+        subprocess.run(["git", "config", "user.name", "Claude Code Agent"], cwd=cache_dir, check=True, capture_output=True, timeout=5)
+        subprocess.run(["git", "config", "user.email", "claude-code@agent.local"], cwd=cache_dir, check=True, capture_output=True, timeout=5)
+        subprocess.run(["git", "add", "."], cwd=cache_dir, check=True, capture_output=True, timeout=5)
+        subprocess.run(["git", "commit", "-m", f"Release v1.0: {project_slug}"], cwd=cache_dir, check=True, capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+    github_url = await _create_and_push_github(
+        cache_dir, project_name=project_slug, is_private=req.is_private, description=f"Production release of {project_slug} via Claude Code Studio"
+    )
+    if not github_url:
+        raise HTTPException(status_code=500, detail="Ошибка публикации в GitHub (проверьте права токена)")
+
+    return JSONResponse(content={"status": "published", "github_url": github_url, "project_name": project_slug})
 
 
 @router.get("/api/list")
