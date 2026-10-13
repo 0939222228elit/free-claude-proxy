@@ -18,6 +18,10 @@ try:
     from huggingface_hub import HfApi
 except ImportError:
     HfApi = None
+try:
+    import asyncpg
+except ImportError:
+    asyncpg = None
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/coder", tags=["coder"])
@@ -58,6 +62,17 @@ class PublishGithubRequest(BaseModel):
     project_name: str = Field(min_length=2, max_length=64)
     auth_key: str = Field(min_length=1)
     is_private: bool = Field(default=False)
+
+
+class RenderDeployRequest(BaseModel):
+    project_name: str = Field(min_length=2, max_length=64)
+    auth_key: str = Field(min_length=1)
+    env: str = Field(default="docker")
+
+
+class SupabaseQueryRequest(BaseModel):
+    sql: str = Field(min_length=1, max_length=16000)
+    auth_key: str = Field(min_length=1)
 
 
 def _get_server_token(request: Request) -> str:
@@ -224,6 +239,113 @@ def _upload_to_huggingface_sync(run_dir: Path, zip_data: bytes, zip_filename: st
 
 async def _upload_to_huggingface(run_dir: Path, zip_data: bytes, zip_filename: str, project_slug: str) -> dict[str, str | None]:
     return await asyncio.to_thread(_upload_to_huggingface_sync, run_dir, zip_data, zip_filename, project_slug)
+
+
+async def _execute_supabase_sql(sql: str) -> dict[str, Any]:
+    """Execute raw SQL statement or query on Supabase PostgreSQL."""
+    if asyncpg is None:
+        raise HTTPException(status_code=500, detail="Модуль asyncpg не установлен")
+
+    db_pass = os.getenv("SUPABASE_DB_PASSWORD", "Elitkamen88")
+    project_id = os.getenv("SUPABASE_PROJECT_ID", "hrxmvitapcwfubcdaomu")
+    host = os.getenv("SUPABASE_DB_HOST", "aws-0-eu-west-1.pooler.supabase.com")
+    port = int(os.getenv("SUPABASE_DB_PORT", "5432"))
+    user = os.getenv("SUPABASE_DB_USER", f"postgres.{project_id}")
+    database = os.getenv("SUPABASE_DB_NAME", "postgres")
+
+    try:
+        conn = await asyncio.wait_for(
+            asyncpg.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=db_pass,
+                database=database,
+                ssl="require",
+            ),
+            timeout=10.0,
+        )
+        try:
+            trimmed = sql.strip().upper()
+            if trimmed.startswith(("SELECT", "SHOW", "EXPLAIN")):
+                records = await conn.fetch(sql)
+                rows = [dict(r) for r in records]
+                for r in rows:
+                    for k, v in r.items():
+                        if not isinstance(v, (str, int, float, bool, type(None))):
+                            r[k] = str(v)
+                return {"status": "success", "type": "select", "count": len(rows), "rows": rows}
+            else:
+                status_msg = await conn.execute(sql)
+                return {"status": "success", "type": "execute", "message": status_msg}
+        finally:
+            await conn.close()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def _deploy_to_render_service(project_name: str, env: str = "docker") -> dict[str, Any]:
+    """Create or trigger deployment for a Web Service on Render."""
+    token = os.getenv("RENDER_API_TOKEN", "")
+    owner_id = os.getenv("RENDER_OWNER_ID", "tea-cv0t9j3tq21c73fbjhsg")
+    gh_user = os.getenv("GITHUB_USERNAME", "0939222228elit")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # 1. Check if service already exists
+        res = await client.get("https://api.render.com/v1/services?limit=50", headers=headers)
+        if res.status_code == 200:
+            services = res.json()
+            for s in services:
+                svc = s.get("service", {})
+                if svc.get("name") == project_name:
+                    svc_id = svc.get("id")
+                    url = svc.get("serviceDetails", {}).get("url")
+                    dep_res = await client.post(f"https://api.render.com/v1/services/{svc_id}/deploys", headers=headers)
+                    return {
+                        "status": "existing_service_redeployed",
+                        "service_id": svc_id,
+                        "url": url,
+                        "deploy": dep_res.json() if dep_res.status_code in (200, 201) else None,
+                    }
+
+        # 2. Create new Web Service on Render
+        repo_url = f"https://github.com/{gh_user}/{project_name}"
+        payload = {
+            "type": "web_service",
+            "name": project_name,
+            "ownerId": owner_id,
+            "repo": repo_url,
+            "branch": "main",
+            "autoDeployTrigger": "commit",
+            "serviceDetails": {
+                "env": env,
+                "plan": "free",
+                "region": "frankfurt",
+            },
+        }
+
+        create_res = await client.post("https://api.render.com/v1/services", headers=headers, json=payload)
+        if create_res.status_code in (200, 201):
+            created = create_res.json()
+            url = created.get("serviceDetails", {}).get("url") or f"https://{project_name}.onrender.com"
+            return {
+                "status": "created",
+                "service_id": created.get("id"),
+                "url": url,
+                "service": created,
+            }
+        else:
+            return {
+                "status": "error",
+                "code": create_res.status_code,
+                "error": create_res.text,
+            }
 
 
 @router.get("/icon.svg")
@@ -541,6 +663,14 @@ async def coder_dashboard(request: Request):
             class="hidden px-2.5 py-1 rounded bg-[#1b3323] hover:bg-[#254630] text-emerald-300 text-xs font-bold border border-[#2b5938] flex items-center gap-1.5 transition shadow-sm animate-pulse" title="Создать репозиторий в GitHub">
             <span>🚀</span> <span>В GitHub</span>
           </button>
+          <button id="btnDeployRender" onclick="deployCurrentProjectToRender()"
+            class="hidden px-2.5 py-1 rounded bg-[#1e293b] hover:bg-[#334155] text-sky-300 text-xs font-bold border border-[#38bdf8]/40 flex items-center gap-1.5 transition shadow-sm" title="Развернуть веб-сервис на Render">
+            <span>🌐</span> <span>На Render</span>
+          </button>
+          <a id="renderLiveLink" href="#" target="_blank"
+            class="hidden px-2.5 py-1 rounded bg-[#0f2d42] hover:bg-[#153e5b] text-cyan-300 text-xs font-bold border border-[#0ea5e9]/60 flex items-center gap-1.5 transition" title="Открыть живой сайт на Render">
+            <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span> <span>Live on Render</span>
+          </a>
         </div>
       </div>
 
@@ -837,6 +967,74 @@ async def coder_dashboard(request: Request):
       }}
     }}
 
+    async function deployCurrentProjectToRender(targetSlug) {{
+      const projName = targetSlug || currentProjectSlug || document.getElementById('projNameInput').value.trim() || 'project';
+      const btn = document.getElementById('btnDeployRender');
+      let oldHtml = '<span>🌐</span> <span>На Render</span>';
+      if (btn) {{
+        oldHtml = btn.innerHTML;
+        btn.innerHTML = '<span>⏳</span> <span>Деплой...</span>';
+        btn.disabled = true;
+      }}
+      addStep('🌐', `Запуск деплоя проекта <b>${{projName}}</b> на Render...`, 'info');
+
+      try {{
+        const authKey = localStorage.getItem('claude_auth_key') || 'sk-fcc-master-key-2026';
+        const res = await fetch('/coder/api/devops/render/deploy', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ project_name: projName, auth_key: authKey, env: 'docker' }})
+        }});
+        const data = await res.json();
+        if (res.ok && data.url) {{
+          addStep('🚀', `Успешно развернуто на Render: <a href="${{data.url}}" target="_blank" class="underline text-sky-400 font-bold">${{data.url}}</a> (${{data.status}})`, 'success');
+          const renderLink = document.getElementById('renderLiveLink');
+          if (renderLink) {{
+            renderLink.href = data.url;
+            renderLink.classList.remove('hidden');
+          }}
+          if (btn) btn.classList.add('hidden');
+        }} else {{
+          addStep('❌', 'Ошибка деплоя на Render: ' + (data.detail || data.error || JSON.stringify(data)), 'error');
+          if (btn) {{
+            btn.innerHTML = oldHtml;
+            btn.disabled = false;
+          }}
+        }}
+      }} catch (err) {{
+        addStep('❌', 'Сетевая ошибка деплоя: ' + err.message, 'error');
+        if (btn) {{
+          btn.innerHTML = oldHtml;
+          btn.disabled = false;
+        }}
+      }}
+    }}
+
+    async function executeSupabaseSql(query) {{
+      addStep('🐘', `Выполнение SQL в Supabase: <code class="text-amber-300 font-mono">${{escapeHtml(query)}}</code>`, 'info');
+      try {{
+        const authKey = localStorage.getItem('claude_auth_key') || 'sk-fcc-master-key-2026';
+        const res = await fetch('/coder/api/devops/supabase/query', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ sql: query, auth_key: authKey }})
+        }});
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {{
+          if (data.type === 'select') {{
+            const preview = JSON.stringify(data.rows, null, 2);
+            addStep('✅', `Найдено записей (${{data.count}}):<pre class="bg-black/50 p-2 rounded mt-1 overflow-x-auto text-[11px] font-mono leading-relaxed">${{escapeHtml(preview)}}</pre>`, 'success');
+          }} else {{
+            addStep('✅', `SQL выполнен успешно: ${{data.message || 'OK'}}`, 'success');
+          }}
+        }} else {{
+          addStep('❌', 'Ошибка SQL: ' + (data.error || data.detail || JSON.stringify(data)), 'error');
+        }}
+      }} catch (err) {{
+        addStep('❌', 'Сетевая ошибка SQL: ' + err.message, 'error');
+      }}
+    }}
+
     async function runAgent() {{
       const prompt = document.getElementById('promptInput').value.trim();
       const projName = document.getElementById('projNameInput').value.trim() || 'project';
@@ -855,7 +1053,49 @@ async def coder_dashboard(request: Request):
       // Handle Slash Commands
       if (prompt.startsWith('/')) {{
         if (prompt === '/help') {{
-          addStep('ℹ️', 'Команды: /help (помощь), /clear (очистить экран), /model (выбрать модель), /git (настройки)', 'highlight');
+          addStep('ℹ️', 'Команды DevOps:<br>• <b>/services</b> — показать активные сервисы на Render<br>• <b>/deploy</b> — развернуть проект на Render<br>• <b>/tables</b> — показать таблицы базы данных Supabase<br>• <b>/sql &lt;запрос&gt;</b> — выполнить SQL на Supabase<br>• <b>/clear</b> — очистить экран<br>• <b>/model</b> — настройки моделей', 'highlight');
+          document.getElementById('promptInput').value = '';
+          return;
+        }}
+        if (prompt === '/services') {{
+          addStep('🌐', 'Запрос списка сервисов на Render...', 'info');
+          fetch('/coder/api/devops/render/services')
+            .then(r => r.json())
+            .then(data => {{
+              if (data && data.services) {{
+                const list = data.services.map(s => `• <b>${{s.name}}</b> — <a href="${{s.url}}" target="_blank" class="text-sky-400 underline font-mono">${{s.url || 'no-url'}}</a> [${{s.status}}]`).join('<br>');
+                addStep('🌐', `<b>Сервисы Render (${{data.services.length}}):</b><br>${{list || 'Нет сервисов'}}`, 'success');
+              }} else {{
+                addStep('⚠️', 'Не удалось получить сервисы: ' + JSON.stringify(data), 'error');
+              }}
+            }}).catch(e => addStep('❌', 'Ошибка: ' + e.message, 'error'));
+          document.getElementById('promptInput').value = '';
+          return;
+        }}
+        if (prompt.startsWith('/deploy')) {{
+          const target = prompt.replace('/deploy', '').trim() || currentProjectSlug || document.getElementById('projNameInput').value.trim();
+          deployCurrentProjectToRender(target);
+          document.getElementById('promptInput').value = '';
+          return;
+        }}
+        if (prompt === '/tables') {{
+          addStep('🐘', 'Запрос таблиц Supabase PostgreSQL...', 'info');
+          fetch('/coder/api/devops/supabase/tables')
+            .then(r => r.json())
+            .then(data => {{
+              if (data && data.tables) {{
+                const list = data.tables.map(t => `• <b>${{t.name}}</b> (колонок: ${{t.columns_count || 0}})`).join('<br>');
+                addStep('🐘', `<b>Таблицы Supabase (${{data.tables.length}}):</b><br>${{list || 'Таблиц пока нет'}}`, 'success');
+              }} else {{
+                addStep('⚠️', 'Ошибка: ' + JSON.stringify(data), 'error');
+              }}
+            }}).catch(e => addStep('❌', 'Ошибка: ' + e.message, 'error'));
+          document.getElementById('promptInput').value = '';
+          return;
+        }}
+        if (prompt.startsWith('/sql ')) {{
+          const sqlQuery = prompt.replace('/sql ', '').trim();
+          executeSupabaseSql(sqlQuery);
           document.getElementById('promptInput').value = '';
           return;
         }}
@@ -981,6 +1221,9 @@ async def coder_dashboard(request: Request):
             sbLink.classList.remove('hidden');
           }}
         }}
+
+        const depBtn = document.getElementById('btnDeployRender');
+        if (depBtn) depBtn.classList.remove('hidden');
 
         // Render Artifacts Tabs
         if (data.file_contents && Object.keys(data.file_contents).length > 0) {{
@@ -1375,3 +1618,77 @@ async def list_supabase_projects():
         return JSONResponse(content=results)
     except Exception:
         return JSONResponse(content=[], status_code=200)
+
+
+@router.post("/api/devops/render/deploy")
+async def devops_deploy_render(req: RenderDeployRequest, request: Request):
+    """Deploy or redeploy a GitHub repository to Render as a Web Service."""
+    _verify_auth(req.auth_key, request)
+    project_slug = _sanitize_project_name(req.project_name)
+
+    # First verify if GitHub repo exists, if not, publish it first!
+    gh_user = os.getenv("GITHUB_USERNAME", "0939222228elit")
+    gh_token = os.getenv("GITHUB_TOKEN", "")
+    headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"https://api.github.com/repos/{gh_user}/{project_slug}", headers=headers)
+        if r.status_code != 200:
+            cache_dir = Path("/tmp/coder_cache") / project_slug
+            if cache_dir.exists():
+                await _create_and_push_github(cache_dir, project_slug, False, f"Auto-published for Render deploy")
+
+    res = await _deploy_to_render_service(project_slug, env=req.env)
+    return JSONResponse(content=res)
+
+
+@router.get("/api/devops/render/services")
+async def devops_list_render_services():
+    """List all Web Services on Render."""
+    token = os.getenv("RENDER_API_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get("https://api.render.com/v1/services?limit=50", headers=headers)
+            if res.status_code == 200:
+                services = []
+                for s in res.json():
+                    svc = s.get("service", {})
+                    services.append({
+                        "id": svc.get("id"),
+                        "name": svc.get("name"),
+                        "env": svc.get("serviceDetails", {}).get("env"),
+                        "url": svc.get("serviceDetails", {}).get("url"),
+                        "status": svc.get("suspended") or "active",
+                        "updated_at": svc.get("updatedAt"),
+                    })
+                return JSONResponse(content={"status": "success", "services": services})
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)
+    return JSONResponse(content={"status": "success", "services": []})
+
+
+@router.post("/api/devops/supabase/query")
+async def devops_supabase_query(req: SupabaseQueryRequest, request: Request):
+    """Execute raw SQL query on Supabase PostgreSQL."""
+    _verify_auth(req.auth_key, request)
+    res = await _execute_supabase_sql(req.sql)
+    return JSONResponse(content=res)
+
+
+@router.get("/api/devops/supabase/tables")
+async def devops_supabase_tables():
+    """List all public PostgreSQL tables in Supabase with columns count."""
+    sql = """
+        SELECT t.table_name, COUNT(c.column_name) as columns_count
+        FROM information_schema.tables t
+        LEFT JOIN information_schema.columns c 
+          ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+        WHERE t.table_schema = 'public'
+        GROUP BY t.table_name
+        ORDER BY t.table_name;
+    """
+    res = await _execute_supabase_sql(sql)
+    if res.get("status") == "success":
+        tables = [{"name": r["table_name"], "columns_count": int(r["columns_count"])} for r in res.get("rows", [])]
+        return JSONResponse(content={"status": "success", "tables": tables})
+    return JSONResponse(content=res)
