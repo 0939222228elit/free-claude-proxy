@@ -169,8 +169,8 @@ def compose_settings_snapshot(
     for key in recognized:
         if key not in process:
             continue
-        # Servers and independently opened clients share the managed token/default.
-        if key == ANTHROPIC_AUTH_TOKEN_ENV:
+        # If ANTHROPIC_AUTH_TOKEN is provided in process environment, allow it
+        if key == ANTHROPIC_AUTH_TOKEN_ENV and not process.get(key):
             continue
         values[key] = process[key]
         if name := aliases.get(key):
