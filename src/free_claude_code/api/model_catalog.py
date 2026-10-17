@@ -106,6 +106,11 @@ class ModelsListResponse(BaseModel):
 
 SUPPORTED_CLAUDE_MODELS = [
     ModelResponse(
+        id="claude-opus-5.5",
+        display_name="Claude Opus 5.5",
+        created_at="2026-10-01T00:00:00Z",
+    ),
+    ModelResponse(
         id="claude-fable-5",
         display_name="Claude Fable 5",
         created_at="2026-06-09T00:00:00Z",

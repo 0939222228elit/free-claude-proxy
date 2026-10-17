@@ -51,7 +51,7 @@ CLAUDE_SVG_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 51
 class CoderTaskRequest(BaseModel):
     project_name: str = Field(min_length=2, max_length=64)
     prompt: str = Field(min_length=2, max_length=16000)
-    model: str = Field(default="claude-fable-5.5")
+    model: str = Field(default="claude-opus-5.5")
     auth_key: str = Field(min_length=1)
     push_github: bool = Field(default=False)
     github_private: bool = Field(default=False)
@@ -562,7 +562,7 @@ async def coder_dashboard(request: Request):
         <div class="text-[#a89f92] select-none text-[11px]">
           <div class="text-[#d97757]">╭─────────────────────────────────────────────────────────────╮</div>
           <div class="text-[#d97757]">│  <span class="text-[#f5f2eb] font-bold">Claude Code Studio</span> <span class="text-[#888]">v5.5 (Autonomous Software Engineer)</span>   │</div>
-          <div class="text-[#d97757]">│  <span class="text-[#888]">Model:</span> <span class="text-emerald-400 font-bold">claude-fable-5.5</span> <span class="text-[#888]">| Cloud:</span> <span class="text-[#d97757]">GitHub + Hugging Face</span>        │</div>
+          <div class="text-[#d97757]">│  <span class="text-[#888]">Model:</span> <span class="text-emerald-400 font-bold">claude-opus-5.5</span> <span class="text-[#888]">| Cloud:</span> <span class="text-[#d97757]">GitHub + Hugging Face</span>        │</div>
           <div class="text-[#d97757]">╰─────────────────────────────────────────────────────────────╯</div>
         </div>
 
@@ -611,7 +611,7 @@ async def coder_dashboard(request: Request):
           <input id="projNameInput" type="text" value="my_agent_project" placeholder="my_project"
             class="bg-[#100f0e] border border-[#2c2723] rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-[#d97757] w-48">
           <div class="flex-1 text-right text-[11px] text-[#787167]">
-            <span class="text-emerald-400">●</span> <span id="selectedModelLabel">claude-fable-5.5</span>
+            <span class="text-emerald-400">●</span> <span id="selectedModelLabel">claude-opus-5.5</span>
           </div>
         </div>
 
@@ -726,7 +726,8 @@ async def coder_dashboard(request: Request):
           <label class="block text-[#a69e92] mb-1">Модель интеллекта</label>
           <select id="settingModelSelect"
             class="w-full bg-[#100f0e] border border-[#2d2824] rounded-lg p-2.5 text-white focus:outline-none focus:border-[#d97757]">
-            <option value="claude-fable-5.5" selected>⚡ Mistral Codestral (Кодовый эксперт, 0.5с) [Рекомендуется]</option>
+            <option value="claude-opus-5.5" selected>⚡ Claude Opus 5.5 (Mistral Codestral Ultra, 0.5с) [По умолчанию]</option>
+            <option value="claude-fable-5.5">🎭 Claude Fable 5.5</option>
             <option value="groq/qwen/qwen3.8-27b">🚀 Groq Qwen 3.8 (Ультра-скорость 35мс)</option>
             <option value="groq/openai/gpt-oss-120b">🧠 Groq GPT-OSS 120B (Глубокие рассуждения)</option>
             <option value="gemini/gemini-3.5-flash">🌟 Google Gemini 3.5 Flash (Широкий контекст)</option>
