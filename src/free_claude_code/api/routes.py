@@ -349,8 +349,68 @@ async def stop_cli(
     return {"status": "stopped", "cancelled_count": count}
 
 
-@router.get("/download/claude_bot_connect.py")
-@router.get("/claude_bot_connect.py")
+DOWNLOAD_HTML_PAGE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Скачать файл подключения Claude Opus 5.5 для бота</title>
+  <link rel="icon" href="/coder/icon.svg" type="image/svg+xml">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #12100f; color: #f5f2eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .terracotta-btn { background-color: #d97757; color: white; transition: all 0.2s; }
+    .terracotta-btn:hover { background-color: #c46445; transform: translateY(-1px); }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-4">
+  <div class="max-w-xl w-full bg-[#1a1715] border border-[#2e2824] rounded-2xl p-6 sm:p-8 shadow-2xl">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-12 h-12 rounded-xl overflow-hidden border border-[#3e342d] bg-[#221c18] flex items-center justify-center shadow-lg">
+        <img src="/coder/icon.svg" alt="Claude" class="w-full h-full object-cover">
+      </div>
+      <div>
+        <h1 class="text-xl font-bold text-[#f5f2eb]">Файл подключения для бота</h1>
+        <p class="text-xs text-[#a69e92]">Claude Opus 5.5 • Proxy Kit</p>
+      </div>
+    </div>
+
+    <div class="space-y-4 mb-6">
+      <div class="bg-[#12100f] border border-[#26211d] rounded-xl p-4 text-xs font-mono space-y-2">
+        <div class="flex justify-between"><span class="text-[#888]">API Key:</span><span class="text-emerald-400 font-bold">sk-fcc-master-key-2026</span></div>
+        <div class="flex justify-between"><span class="text-[#888]">Model:</span><span class="text-[#d97757] font-bold">claude-opus-5.5</span></div>
+        <div class="flex justify-between"><span class="text-[#888]">Base URL:</span><span class="text-[#c7bfb3] truncate max-w-[260px]">https://free-claude-code-proxy-kwbo.onrender.com</span></div>
+      </div>
+
+      <!-- Main Download Button -->
+      <a href="/download/claude_bot_connect.py" download="claude_bot_connect.py"
+        class="terracotta-btn w-full py-3.5 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-[#d97757]/20">
+        <span>⬇️</span> Скачать claude_bot_connect.py (10 KB)
+      </a>
+
+      <!-- Secondary Zip Download -->
+      <a href="/download/claude_bot_kit.zip" download="claude_bot_kit.zip"
+        class="w-full py-2.5 px-4 rounded-xl font-medium text-xs bg-[#241f1c] hover:bg-[#322b27] border border-[#382f2a] text-[#ded6cb] flex items-center justify-center gap-2 transition">
+        <span>📦</span> Скачать всё архивом (.zip: .py + .env + config.json)
+      </a>
+    </div>
+
+    <div class="pt-4 border-t border-[#26211d] flex items-center justify-between text-xs text-[#8a8277]">
+      <a href="/coder" class="hover:text-[#d97757] transition">← В Claude Studio</a>
+      <a href="https://raw.githubusercontent.com/0939222228elit/free-claude-proxy/main/claude_bot_connect.py" target="_blank" class="hover:text-[#d97757] transition">GitHub Raw ↗</a>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+@router.api_route("/download", methods=["GET", "HEAD"])
+async def download_page():
+    return Response(content=DOWNLOAD_HTML_PAGE, media_type="text/html; charset=utf-8")
+
+
+@router.api_route("/download/claude_bot_connect.py", methods=["GET", "HEAD"])
+@router.api_route("/claude_bot_connect.py", methods=["GET", "HEAD"])
 async def download_bot_connect():
     """Download the self-contained chatbot connection kit for Claude Opus 5.5."""
     import pathlib
@@ -366,4 +426,24 @@ async def download_bot_connect():
             "Cache-Control": "no-cache",
         },
     )
+
+
+@router.api_route("/download/claude_bot_kit.zip", methods=["GET", "HEAD"])
+@router.api_route("/claude_bot_kit.zip", methods=["GET", "HEAD"])
+async def download_bot_zip():
+    """Download the full zip kit containing python client, env and config."""
+    import pathlib
+    zip_path = pathlib.Path(__file__).resolve().parents[3] / "claude_bot_kit.zip"
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Zip kit not found")
+    content = zip_path.read_bytes()
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="claude_bot_kit.zip"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
 
