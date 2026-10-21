@@ -487,12 +487,17 @@ async def coder_dashboard(request: Request):
             <span class="font-bold text-sm tracking-tight text-[#f5f2eb]">Claude Code Studio</span>
             <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#2e2621] text-[#e08264] border border-[#48372d]">v5.5</span>
           </div>
-          <span class="text-[11px] text-[#8e867c] hidden sm:inline">Autonomous Software Engineer • Claude Fable 5.5</span>
+          <span class="text-[11px] text-[#8e867c] hidden sm:inline">Autonomous Software Engineer • Claude Opus 5.5</span>
         </div>
       </div>
 
       <!-- Cloud Badges & Actions -->
       <div class="flex items-center gap-2">
+        <!-- Download Bot Connection Kit Button -->
+        <a href="/download/claude_bot_connect.py" download="claude_bot_connect.py"
+          class="px-2.5 py-1 text-xs rounded-lg bg-[#27211d] hover:bg-[#382d26] text-[#e38668] border border-[#52392d] flex items-center gap-1.5 font-medium transition" title="Скачать файл подключения бота claude_bot_connect.py">
+          <span>🤖</span> <span class="hidden sm:inline">Файл для бота (.py)</span>
+        </a>
         <div class="hidden md:flex items-center gap-1.5 text-[11px] font-mono">
           <span class="px-2 py-0.5 rounded-md bg-[#1e1b19] border border-[#2d2824] text-[#c9c1b6] flex items-center gap-1">
             <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> 🐙 0939222228elit
@@ -1693,3 +1698,22 @@ async def devops_supabase_tables():
         tables = [{"name": r["table_name"], "columns_count": int(r["columns_count"])} for r in res.get("rows", [])]
         return JSONResponse(content={"status": "success", "tables": tables})
     return JSONResponse(content=res)
+
+
+@router.get("/download/claude_bot_connect.py")
+async def coder_download_bot_connect():
+    """Download the self-contained chatbot connection kit for Claude Opus 5.5."""
+    import pathlib
+    script_path = pathlib.Path(__file__).resolve().parents[3] / "claude_bot_connect.py"
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="Connection file not found")
+    content = script_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/x-python; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="claude_bot_connect.py"',
+            "Cache-Control": "no-cache",
+        },
+    )
+

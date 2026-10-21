@@ -347,3 +347,23 @@ async def stop_cli(
     )
     logger.info("STOP_CLI: source=messaging_workflow cancelled_count={}", count)
     return {"status": "stopped", "cancelled_count": count}
+
+
+@router.get("/download/claude_bot_connect.py")
+@router.get("/claude_bot_connect.py")
+async def download_bot_connect():
+    """Download the self-contained chatbot connection kit for Claude Opus 5.5."""
+    import pathlib
+    script_path = pathlib.Path(__file__).resolve().parents[3] / "claude_bot_connect.py"
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="Connection file not found")
+    content = script_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/x-python; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="claude_bot_connect.py"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
